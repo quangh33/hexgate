@@ -1,14 +1,30 @@
 package main
 
 import (
+	"fmt"
+	"github.com/fsnotify/fsnotify"
+	"gopkg.in/yaml.v3"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type Config struct {
+	GatewayPort         string    `yaml:"gatewayPort"`
+	HealthCheckInterval int64     `yaml:"healthCheckInterval"`
+	Services            []Service `yaml:"services"`
+}
+
+type Service struct {
+	Name     string   `yaml:"name"`
+	Backends []string `yaml:"backends"`
+}
 
 // Backend represents a single upstream server
 type Backend struct {
@@ -22,6 +38,90 @@ type ServerPool struct {
 	backends []*Backend
 	current  uint64
 	mu       sync.RWMutex
+}
+
+// NewServerPool creates a new server pool
+func NewServerPool() *ServerPool {
+	return &ServerPool{
+		backends: make([]*Backend, 0),
+		current:  0,
+	}
+}
+
+func loadConfig(configPath string) (*ServerPool, *Config, error) {
+	log.Printf("Loading configuration from %s...", configPath)
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not read config file: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, nil, fmt.Errorf("could not parse config YAML: %w", err)
+	}
+
+	pool := NewServerPool()
+
+	for _, service := range cfg.Services {
+		for _, backendURL := range service.Backends {
+			if err := pool.AddBackend(backendURL); err != nil {
+				log.Printf("Could not add backend %s: %v", backendURL, err)
+			}
+		}
+	}
+
+	pool.StartHealthChecks(time.Duration(cfg.HealthCheckInterval) * time.Second)
+	log.Println("Configuration loaded successfully.")
+	return pool, &cfg, nil
+}
+
+func watchConfig(configPath string, globalServerPool *atomic.Value) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatalf("Failed to create file watcher: %v", err)
+	}
+	defer watcher.Close()
+
+	configDir := filepath.Dir(configPath)
+	configName := filepath.Base(configPath)
+
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if filepath.Base(event.Name) == configName {
+					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
+						log.Println("Config file modified. Reloading...")
+						time.Sleep(100 * time.Millisecond)
+						newPool, _, err := loadConfig(configPath)
+						if err != nil {
+							log.Printf("Error reloading config: %v. Keeping old config.", err)
+							continue
+						}
+
+						globalServerPool.Store(newPool)
+						log.Println("Hot reload complete. New configuration is active.")
+					}
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("File watcher error:", err)
+			}
+		}
+	}()
+
+	err = watcher.Add(configDir)
+	if err != nil {
+		log.Fatalf("Failed to add config directory to watcher: %v", err)
+	}
+	log.Printf("Watching for config changes in directory: %s", configDir)
+	<-make(chan struct{})
 }
 
 // AddBackend adds a new backend server to the pool
@@ -128,10 +228,10 @@ func (s *ServerPool) StartHealthChecks(interval time.Duration) {
 	}()
 }
 
-func lb(pool *ServerPool) http.HandlerFunc {
+func lb(globalServerPool *atomic.Value) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Received request for: %s", r.URL.Path)
-
+		pool := globalServerPool.Load().(*ServerPool)
 		backend := pool.GetNextBackend()
 
 		log.Printf("Forwarding request to: %s", backend.URL)
@@ -141,29 +241,22 @@ func lb(pool *ServerPool) http.HandlerFunc {
 }
 
 func main() {
-	backendServers := []string{
-		"http://localhost:8081",
-		"http://localhost:8082",
-		"http://localhost:8083",
+	configPath := "./config/config.yaml"
+	initialPool, cfg, err := loadConfig(configPath)
+	if err != nil {
+		log.Fatalf("Failed to load initial configuration: %v", err)
 	}
 
-	gatewayPort := "8000"
-	pool := &ServerPool{current: 0}
+	var globalServerPool atomic.Value
+	globalServerPool.Store(initialPool)
 
-	for _, serverURL := range backendServers {
-		if err := pool.AddBackend(serverURL); err != nil {
-			log.Printf("Could not add backend: %v", err)
-		}
-	}
-
-	healthCheckInterval := 5 * time.Second
-	pool.StartHealthChecks(healthCheckInterval)
+	go watchConfig(configPath, &globalServerPool)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", lb(pool))
+	mux.HandleFunc("/", lb(&globalServerPool))
 
-	log.Printf("API Gateway listening on port %s", gatewayPort)
-	if err := http.ListenAndServe(":"+gatewayPort, mux); err != nil {
+	log.Printf("API Gateway listening on port %s", cfg.GatewayPort)
+	if err := http.ListenAndServe(":"+cfg.GatewayPort, mux); err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
 	}
 }

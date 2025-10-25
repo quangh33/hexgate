@@ -1,0 +1,10 @@
+gatewayPort: "8000"
+healthCheckInterval: 5 # in seconds
+services:
+  - name: "service_a"
+    backends:
+      - "http://localhost:8081"
+      - "http://localhost:8082"
+  - name: "service_b"
+    backends:
+      - "http://localhost:8083"
