@@ -10,3 +10,7 @@ services:
     path: "/products/"
     backends:
       - "http://localhost:8083"
+rateLimiting:
+  enabled: true
+  ratePerSecond: 1   # tokens added per second
+  burst: 3

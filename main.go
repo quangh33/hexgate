@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/time/rate"
 	"gopkg.in/yaml.v3"
 	"log"
 	"net/http"
@@ -16,15 +17,27 @@ import (
 )
 
 type Config struct {
-	GatewayPort         string    `yaml:"gatewayPort"`
-	HealthCheckInterval int64     `yaml:"healthCheckInterval"`
-	Services            []Service `yaml:"services"`
+	GatewayPort         string          `yaml:"gatewayPort"`
+	HealthCheckInterval int64           `yaml:"healthCheckInterval"`
+	Services            []Service       `yaml:"services"`
+	RateLimiting        RateLimitConfig `yaml:"rateLimiting"`
+}
+
+type RateLimitConfig struct {
+	Enabled       bool    `yaml:"enabled"`
+	RatePerSecond float64 `yaml:"ratePerSecond"`
+	Burst         int     `yaml:"burst"`
 }
 
 type Service struct {
 	Name     string   `yaml:"name"`
 	Backends []string `yaml:"backends"`
 	Path     string   `yaml:"path"`
+}
+
+type visitor struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
 }
 
 // Backend represents a single upstream server
@@ -36,16 +49,18 @@ type Backend struct {
 
 // ServerPool holds the list of available backends
 type ServerPool struct {
-	backends []*Backend
-	current  uint64
-	mu       sync.RWMutex
+	backends          []*Backend
+	current           uint64
+	mu                sync.RWMutex
+	visitorsRateLimit sync.Map // one rate limiter per user per service
 }
 
 // NewServerPool creates a new server pool
 func NewServerPool() *ServerPool {
 	return &ServerPool{
-		backends: make([]*Backend, 0),
-		current:  0,
+		backends:          make([]*Backend, 0),
+		current:           0,
+		visitorsRateLimit: sync.Map{},
 	}
 }
 
@@ -259,8 +274,14 @@ func buildRouter(cfg *Config) *http.ServeMux {
 		}
 
 		pool.StartHealthChecks(time.Duration(cfg.HealthCheckInterval) * time.Second)
-		handler := newServiceHandler(pool)
-		mux.HandleFunc(service.Path, handler)
+
+		var handler http.Handler = newServiceHandler(pool)
+		if cfg.RateLimiting.Enabled {
+			log.Printf("Enabling rate limiting for service '%s'", service.Name)
+			handler = rateLimitMiddleware(handler, cfg.RateLimiting, pool)
+			pool.startVisitorsRateLimitJanitor()
+		}
+		mux.Handle(service.Path, handler)
 		log.Printf("Registered handler for service '%s' at path '%s'", service.Name, service.Path)
 	}
 	return mux
