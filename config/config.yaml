@@ -1,10 +1,12 @@
 gatewayPort: "8000"
 healthCheckInterval: 5 # in seconds
 services:
-  - name: "service_a"
+  - name: "user-service"
+    path: "/users/"
     backends:
       - "http://localhost:8081"
       - "http://localhost:8082"
-  - name: "service_b"
+  - name: "product-service"
+    path: "/products/"
     backends:
       - "http://localhost:8083"

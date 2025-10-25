@@ -24,6 +24,7 @@ type Config struct {
 type Service struct {
 	Name     string   `yaml:"name"`
 	Backends []string `yaml:"backends"`
+	Path     string   `yaml:"path"`
 }
 
 // Backend represents a single upstream server
@@ -48,7 +49,7 @@ func NewServerPool() *ServerPool {
 	}
 }
 
-func loadConfig(configPath string) (*ServerPool, *Config, error) {
+func loadConfig(configPath string) (*http.ServeMux, *Config, error) {
 	log.Printf("Loading configuration from %s...", configPath)
 
 	data, err := os.ReadFile(configPath)
@@ -61,22 +62,12 @@ func loadConfig(configPath string) (*ServerPool, *Config, error) {
 		return nil, nil, fmt.Errorf("could not parse config YAML: %w", err)
 	}
 
-	pool := NewServerPool()
-
-	for _, service := range cfg.Services {
-		for _, backendURL := range service.Backends {
-			if err := pool.AddBackend(backendURL); err != nil {
-				log.Printf("Could not add backend %s: %v", backendURL, err)
-			}
-		}
-	}
-
-	pool.StartHealthChecks(time.Duration(cfg.HealthCheckInterval) * time.Second)
+	router := buildRouter(&cfg)
 	log.Println("Configuration loaded successfully.")
-	return pool, &cfg, nil
+	return router, &cfg, nil
 }
 
-func watchConfig(configPath string, globalServerPool *atomic.Value) {
+func watchConfig(configPath string, globalRouter *atomic.Value) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatalf("Failed to create file watcher: %v", err)
@@ -95,13 +86,13 @@ func watchConfig(configPath string, globalServerPool *atomic.Value) {
 					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
 						log.Println("Config file modified. Reloading...")
 						time.Sleep(100 * time.Millisecond)
-						newPool, _, err := loadConfig(configPath)
+						newRouter, _, err := loadConfig(configPath)
 						if err != nil {
 							log.Printf("Error reloading config: %v. Keeping old config.", err)
 							continue
 						}
 
-						globalServerPool.Store(newPool)
+						globalRouter.Store(newRouter)
 						log.Println("Hot reload complete. New configuration is active.")
 					}
 				}
@@ -237,23 +228,63 @@ func lb(globalServerPool *atomic.Value) http.HandlerFunc {
 	}
 }
 
+func newServiceHandler(pool *ServerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		backend := pool.GetNextBackend()
+		if backend == nil {
+			log.Println("No healthy backends for this service!")
+			http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		log.Printf("Forwarding request to: %s", backend.URL)
+		backend.ReverseProxy.ServeHTTP(w, r)
+	}
+}
+
+func buildRouter(cfg *Config) *http.ServeMux {
+	log.Println("Building new router...")
+	mux := http.NewServeMux()
+
+	for _, service := range cfg.Services {
+		if len(service.Backends) == 0 {
+			log.Printf("Skipping service '%s': no backends configured.", service.Name)
+			continue
+		}
+
+		pool := NewServerPool()
+		for _, backendURL := range service.Backends {
+			if err := pool.AddBackend(backendURL); err != nil {
+				log.Printf("Could not add backend %s for service %s: %v", backendURL, service.Name, err)
+			}
+		}
+
+		pool.StartHealthChecks(time.Duration(cfg.HealthCheckInterval) * time.Second)
+		handler := newServiceHandler(pool)
+		mux.HandleFunc(service.Path, handler)
+		log.Printf("Registered handler for service '%s' at path '%s'", service.Name, service.Path)
+	}
+	return mux
+}
+
 func main() {
 	configPath := "./config/config.yaml"
-	initialPool, cfg, err := loadConfig(configPath)
+	initialRouter, cfg, err := loadConfig(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load initial configuration: %v", err)
 	}
 
-	var globalServerPool atomic.Value
-	globalServerPool.Store(initialPool)
+	var globalRouter atomic.Value
+	globalRouter.Store(initialRouter)
 
-	go watchConfig(configPath, &globalServerPool)
+	go watchConfig(configPath, &globalRouter)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", lb(&globalServerPool))
+	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		router := globalRouter.Load().(*http.ServeMux)
+		router.ServeHTTP(w, r)
+	})
 
 	log.Printf("API Gateway listening on port %s", cfg.GatewayPort)
-	if err := http.ListenAndServe(":"+cfg.GatewayPort, mux); err != nil {
+	if err := http.ListenAndServe(":"+cfg.GatewayPort, rootHandler); err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
 	}
 }
