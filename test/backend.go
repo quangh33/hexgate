@@ -25,6 +25,10 @@ func main() {
 		fmt.Fprintln(w, message)
 	})
 
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[Backend %s] Received request for %s", *port, r.URL.Path)
+	})
+
 	log.Printf("Starting backend server on port %s", *port)
 	if err := http.ListenAndServe(":"+*port, nil); err != nil {
 		log.Fatalf("Failed to start backend server: %v", err)
