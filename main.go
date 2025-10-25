@@ -81,8 +81,6 @@ func watchConfig(configPath string, globalServerPool *atomic.Value) {
 	if err != nil {
 		log.Fatalf("Failed to create file watcher: %v", err)
 	}
-	defer watcher.Close()
-
 	configDir := filepath.Dir(configPath)
 	configName := filepath.Base(configPath)
 
@@ -121,7 +119,6 @@ func watchConfig(configPath string, globalServerPool *atomic.Value) {
 		log.Fatalf("Failed to add config directory to watcher: %v", err)
 	}
 	log.Printf("Watching for config changes in directory: %s", configDir)
-	<-make(chan struct{})
 }
 
 // AddBackend adds a new backend server to the pool
