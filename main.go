@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rsa"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/time/rate"
@@ -21,6 +22,7 @@ type Config struct {
 	HealthCheckInterval int64           `yaml:"healthCheckInterval"`
 	Services            []Service       `yaml:"services"`
 	RateLimiting        RateLimitConfig `yaml:"rateLimiting"`
+	Authentication      AuthConfig      `yaml:"authentication"`
 }
 
 type RateLimitConfig struct {
@@ -38,6 +40,11 @@ type Service struct {
 type visitor struct {
 	limiter  *rate.Limiter
 	lastSeen time.Time
+}
+
+type AuthConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	PublicKeyPath string `yaml:"publicKeyPath"`
 }
 
 // Backend represents a single upstream server
@@ -231,18 +238,6 @@ func (s *ServerPool) StartHealthChecks(interval time.Duration) {
 	}()
 }
 
-func lb(globalServerPool *atomic.Value) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Received request for: %s", r.URL.Path)
-		pool := globalServerPool.Load().(*ServerPool)
-		backend := pool.GetNextBackend()
-
-		log.Printf("Forwarding request to: %s", backend.URL)
-
-		backend.ReverseProxy.ServeHTTP(w, r)
-	}
-}
-
 func newServiceHandler(pool *ServerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		backend := pool.GetNextBackend()
@@ -259,6 +254,15 @@ func newServiceHandler(pool *ServerPool) http.HandlerFunc {
 func buildRouter(cfg *Config) *http.ServeMux {
 	log.Println("Building new router...")
 	mux := http.NewServeMux()
+	var rsaPubKey *rsa.PublicKey
+	if cfg.Authentication.Enabled {
+		var err error
+		rsaPubKey, err = loadPublicKey(cfg.Authentication.PublicKeyPath)
+		if err != nil {
+			log.Fatalf("Failed to load public key: %v. Server cannot start.", err)
+		}
+		log.Println("Successfully loaded RSA public key for JWT validation.")
+	}
 
 	for _, service := range cfg.Services {
 		if len(service.Backends) == 0 {
@@ -280,6 +284,10 @@ func buildRouter(cfg *Config) *http.ServeMux {
 			log.Printf("Enabling rate limiting for service '%s'", service.Name)
 			handler = rateLimitMiddleware(handler, cfg.RateLimiting, pool)
 			pool.startVisitorsRateLimitJanitor()
+		}
+		if cfg.Authentication.Enabled {
+			log.Printf("Enabling JWT authentication for service '%s'", service.Name)
+			handler = jwtAuthMiddleware(handler, rsaPubKey)
 		}
 		mux.Handle(service.Path, handler)
 		log.Printf("Registered handler for service '%s' at path '%s'", service.Name, service.Path)
