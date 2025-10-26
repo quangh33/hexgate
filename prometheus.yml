@@ -13,5 +13,5 @@ scrape_configs:
     static_configs:
       # 'host.docker.internal' is a special DNS name that resolves
       # to the host machine from within a Docker container.
-      # Port 8000 is from your config.yaml gatewayPort.
+      # Port 8443 is from config.yaml.
       - targets: ['host.docker.internal:8443']
