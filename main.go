@@ -4,6 +4,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"github.com/fsnotify/fsnotify"
+	"github.com/hashicorp/consul/api"
 	"golang.org/x/time/rate"
 	"gopkg.in/yaml.v3"
 	"log"
@@ -18,11 +19,10 @@ import (
 )
 
 type Config struct {
-	GatewayPort         string          `yaml:"gatewayPort"`
-	HealthCheckInterval int64           `yaml:"healthCheckInterval"`
-	Services            []Service       `yaml:"services"`
-	RateLimiting        RateLimitConfig `yaml:"rateLimiting"`
-	Authentication      AuthConfig      `yaml:"authentication"`
+	GatewayPort    string          `yaml:"gatewayPort"`
+	Services       []Service       `yaml:"services"`
+	RateLimiting   RateLimitConfig `yaml:"rateLimiting"`
+	Authentication AuthConfig      `yaml:"authentication"`
 }
 
 type RateLimitConfig struct {
@@ -32,9 +32,9 @@ type RateLimitConfig struct {
 }
 
 type Service struct {
-	Name     string   `yaml:"name"`
-	Backends []string `yaml:"backends"`
-	Path     string   `yaml:"path"`
+	Name              string `yaml:"name"`
+	Path              string `yaml:"path"`
+	ConsulServiceName string `yaml:"consulServiceName"`
 }
 
 type visitor struct {
@@ -56,7 +56,7 @@ type Backend struct {
 
 // ServerPool holds the list of available backends
 type ServerPool struct {
-	backends          []*Backend
+	backends          map[string]*Backend // Consul Service id -> Backend
 	current           uint64
 	mu                sync.RWMutex
 	visitorsRateLimit sync.Map // one rate limiter per user per service
@@ -65,13 +65,13 @@ type ServerPool struct {
 // NewServerPool creates a new server pool
 func NewServerPool() *ServerPool {
 	return &ServerPool{
-		backends:          make([]*Backend, 0),
+		backends:          make(map[string]*Backend),
 		current:           0,
 		visitorsRateLimit: sync.Map{},
 	}
 }
 
-func loadConfig(configPath string) (*http.ServeMux, *Config, error) {
+func loadConfig(configPath string, consulClient *api.Client) (*http.ServeMux, *Config, error) {
 	log.Printf("Loading configuration from %s...", configPath)
 
 	data, err := os.ReadFile(configPath)
@@ -84,12 +84,12 @@ func loadConfig(configPath string) (*http.ServeMux, *Config, error) {
 		return nil, nil, fmt.Errorf("could not parse config YAML: %w", err)
 	}
 
-	router := buildRouter(&cfg)
+	router := buildRouter(&cfg, consulClient)
 	log.Println("Configuration loaded successfully.")
 	return router, &cfg, nil
 }
 
-func watchConfig(configPath string, globalRouter *atomic.Value) {
+func watchConfig(configPath string, globalRouter *atomic.Value, consulClient *api.Client) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatalf("Failed to create file watcher: %v", err)
@@ -108,7 +108,7 @@ func watchConfig(configPath string, globalRouter *atomic.Value) {
 					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
 						log.Println("Config file modified. Reloading...")
 						time.Sleep(100 * time.Millisecond)
-						newRouter, _, err := loadConfig(configPath)
+						newRouter, _, err := loadConfig(configPath, consulClient)
 						if err != nil {
 							log.Printf("Error reloading config: %v. Keeping old config.", err)
 							continue
@@ -134,8 +134,25 @@ func watchConfig(configPath string, globalRouter *atomic.Value) {
 	log.Printf("Watching for config changes in directory: %s", configDir)
 }
 
+func (s *ServerPool) RemoveBackend(serviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if b, ok := s.backends[serviceID]; ok {
+		delete(s.backends, serviceID)
+		log.Printf("Removed backend: %s (ID: %s)", b.URL, serviceID)
+	}
+}
+
 // AddBackend adds a new backend server to the pool
-func (s *ServerPool) AddBackend(backendURL string) error {
+func (s *ServerPool) AddBackend(serviceID string, backendURL string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.backends[serviceID]; ok {
+		return fmt.Errorf("backend with ID %s already exists", serviceID)
+	}
+
 	parsedURL, err := url.Parse(backendURL)
 	if err != nil {
 		return err
@@ -154,10 +171,8 @@ func (s *ServerPool) AddBackend(backendURL string) error {
 
 	backend.SetAlive(true)
 	backend.ReverseProxy = proxy
-	s.mu.Lock()
-	s.backends = append(s.backends, backend)
-	s.mu.Unlock()
-	log.Printf("Added backend: %s", backendURL)
+	s.backends[serviceID] = backend
+	log.Printf("Added backend: %s, id: %s", backendURL, serviceID)
 	return nil
 }
 
@@ -170,10 +185,15 @@ func (s *ServerPool) GetNextBackend() *Backend {
 	if totalBackends == 0 {
 		return nil
 	}
+
+	ids := make([]string, 0, totalBackends)
+	for id := range s.backends {
+		ids = append(ids, id)
+	}
 	nextIndex := atomic.AddUint64(&s.current, 1)
 	for i := 0; i < totalBackends; i++ {
 		idx := (nextIndex + uint64(i)) % uint64(totalBackends)
-		backend := s.backends[idx]
+		backend := s.backends[ids[idx]]
 
 		if backend.isAlive.Load() {
 			return backend
@@ -183,59 +203,7 @@ func (s *ServerPool) GetNextBackend() *Backend {
 }
 
 func (b *Backend) SetAlive(alive bool) {
-	currentStatus := b.isAlive.Load()
-
-	if currentStatus != alive {
-		b.isAlive.Store(alive)
-		if alive {
-			log.Printf("Backend %s is now HEALTHY", b.URL)
-		} else {
-			log.Printf("Backend %s is now UNHEALTHY", b.URL)
-		}
-	}
-}
-
-func (s *ServerPool) StartHealthChecks(interval time.Duration) {
-	healthCheckClient := &http.Client{
-		Timeout: 5 * time.Second,
-	}
-
-	log.Println("Starting health checks...")
-
-	go func() {
-		for {
-			s.mu.RLock()
-			backends := make([]*Backend, len(s.backends))
-			copy(backends, s.backends)
-			s.mu.RUnlock()
-
-			var wg sync.WaitGroup
-			for _, b := range backends {
-				wg.Add(1)
-				go func(backend *Backend) {
-					defer wg.Done()
-					req, err := http.NewRequest("HEAD", backend.URL.String()+"/health", nil)
-					if err != nil {
-						log.Printf("Error creating health check request for %s: %v", backend.URL, err)
-						return
-					}
-					resp, err := healthCheckClient.Do(req)
-					if err != nil {
-						backend.SetAlive(false)
-						return
-					}
-					defer resp.Body.Close()
-					if resp.StatusCode != http.StatusOK {
-						backend.SetAlive(false)
-					} else {
-						backend.SetAlive(true)
-					}
-				}(b)
-			}
-			wg.Wait()
-			time.Sleep(interval)
-		}
-	}()
+	b.isAlive.Store(alive)
 }
 
 func newServiceHandler(pool *ServerPool) http.HandlerFunc {
@@ -251,7 +219,7 @@ func newServiceHandler(pool *ServerPool) http.HandlerFunc {
 	}
 }
 
-func buildRouter(cfg *Config) *http.ServeMux {
+func buildRouter(cfg *Config, consulClient *api.Client) *http.ServeMux {
 	log.Println("Building new router...")
 	mux := http.NewServeMux()
 	var rsaPubKey *rsa.PublicKey
@@ -265,19 +233,13 @@ func buildRouter(cfg *Config) *http.ServeMux {
 	}
 
 	for _, service := range cfg.Services {
-		if len(service.Backends) == 0 {
-			log.Printf("Skipping service '%s': no backends configured.", service.Name)
+		if service.ConsulServiceName == "" {
+			log.Printf("Skipping service '%s': missing 'consulServiceName'", service.Name)
 			continue
 		}
 
 		pool := NewServerPool()
-		for _, backendURL := range service.Backends {
-			if err := pool.AddBackend(backendURL); err != nil {
-				log.Printf("Could not add backend %s for service %s: %v", backendURL, service.Name, err)
-			}
-		}
-
-		pool.StartHealthChecks(time.Duration(cfg.HealthCheckInterval) * time.Second)
+		pool.startConsulWatcher(consulClient, service.ConsulServiceName)
 
 		var handler http.Handler = newServiceHandler(pool)
 		if cfg.RateLimiting.Enabled {
@@ -297,7 +259,12 @@ func buildRouter(cfg *Config) *http.ServeMux {
 
 func main() {
 	configPath := "./config/config.yaml"
-	initialRouter, cfg, err := loadConfig(configPath)
+	consulClient, err := api.NewClient(api.DefaultConfig())
+	if err != nil {
+		log.Fatalf("Failed to create Consul client: %v", err)
+	}
+
+	initialRouter, cfg, err := loadConfig(configPath, consulClient)
 	if err != nil {
 		log.Fatalf("Failed to load initial configuration: %v", err)
 	}
@@ -305,7 +272,7 @@ func main() {
 	var globalRouter atomic.Value
 	globalRouter.Store(initialRouter)
 
-	go watchConfig(configPath, &globalRouter)
+	go watchConfig(configPath, &globalRouter, consulClient)
 
 	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		router := globalRouter.Load().(*http.ServeMux)

@@ -3,17 +3,14 @@ healthCheckInterval: 5 # in seconds
 services:
   - name: "user-service"
     path: "/users/"
-    backends:
-      - "http://localhost:8081"
-      - "http://localhost:8082"
+    consulServiceName: "user-service"
   - name: "product-service"
     path: "/products/"
-    backends:
-      - "http://localhost:8083"
+    consulServiceName: "product-service"
 rateLimiting:
   enabled: true
   ratePerSecond: 1   # tokens added per second
   burst: 3
 authentication:
-  enabled: true
+  enabled: false
   publicKeyPath: "./config/public.pem"
