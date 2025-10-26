@@ -1,7 +1,7 @@
 # HexGate
 HexGate is a lightweight, high-performance API Gateway built from scratch in Go.
 
-![](gate.png)
+![](img/gate.png)
 
 ## ✨Features
 - **Dynamic Service Discovery**: Integrates directly with HashiCorp Consul. 
@@ -12,12 +12,12 @@ or fail health checks.
 - **Zero-Downtime Hot Reloading**: Automatically detects changes to config.yaml (e.g., new services, auth keys)
 - **JWT Authentication (RS256)**: Secures routes with a secure, asymmetric (RS256) JWT validation middleware.
 - **Per-IP Rate Limiting**: Protects services with a per-service, per-IP token bucket rate limiter.
-
+- **Built-in Observability**: Exposes a /metrics endpoint for Prometheus, tracking request rates, latencies, and response codes
 ## 🚀 Getting Started
 1. Prerequisites 
 - Go 1.19 or later
 - HashiCorp Consul (for service discovery)
-- OpenSSL (for generating auth keys)
+- Docker & Docker Compose (for monitoring stack)
 
 2. Run Consul
 ```bash
@@ -40,6 +40,30 @@ go run test/backend.go -port 8082 -service "user-service"
 go run test/backend.go -port 8083 -service "product-service"
 ```
 As you start each backend, you will see `hexgate`'s log update in real-time as it discovers them!
+
+5. Run the Monitoring Stack (Optional)
+
+This launches Prometheus and Grafana, pre-configured to scrape HexGate.
+
+```bash
+docker-compose up -d
+```
+- Prometheus: http://localhost:9090
+- Grafana: http://localhost:3000 (login: admin / admin)
+
+## 📊Monitoring Dashboard
+HexGate is pre-configured to work with the included Prometheus and Grafana stack.
+
+### Grafana Setup
+1. Navigate to http://localhost:3000 (login: admin / admin).
+2. On the left menu, go to Connections (plug icon) -> Add new connection.
+3. Select Prometheus.
+4. For "Prometheus server URL", enter: http://prometheus:9090
+5. Click "Save & Test". You should see a green success message.
+6. On the left menu, click the Dashboard icon (four squares) -> New -> New Dashboard to start building.
+On the left menu, click the Dashboard icon (four squares) -> New -> New Dashboard to start building.
+
+![](img/grafana.png)
 
 ## 🧪 Testing the Gateway
 ### Test 1: Service Discovery & Routing
