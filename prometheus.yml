@@ -1,5 +1,5 @@
 global:
-  scrape_interval: 15s # How often to scrape targets
+  scrape_interval: 5s # How often to scrape targets
 
 scrape_configs:
   - job_name: 'prometheus'
@@ -7,8 +7,11 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   - job_name: 'hexgate'
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
     static_configs:
       # 'host.docker.internal' is a special DNS name that resolves
       # to the host machine from within a Docker container.
       # Port 8000 is from your config.yaml gatewayPort.
-      - targets: ['host.docker.internal:8000']
+      - targets: ['host.docker.internal:8443']
