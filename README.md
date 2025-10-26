@@ -61,7 +61,6 @@ HexGate is pre-configured to work with the included Prometheus and Grafana stack
 4. For "Prometheus server URL", enter: http://prometheus:9090
 5. Click "Save & Test". You should see a green success message.
 6. On the left menu, click the Dashboard icon (four squares) -> New -> New Dashboard to start building.
-On the left menu, click the Dashboard icon (four squares) -> New -> New Dashboard to start building.
 
 ![](img/grafana.png)
 
