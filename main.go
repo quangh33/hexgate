@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/consul/api"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/time/rate"
 	"gopkg.in/yaml.v3"
 	"log"
@@ -241,6 +242,7 @@ func buildRouter(cfg *Config, consulClient *api.Client) *http.ServeMux {
 		pool := NewServerPool()
 		pool.startConsulWatcher(consulClient, service.ConsulServiceName)
 
+		// --- MIDDLEWARE CHAINING ---
 		var handler http.Handler = newServiceHandler(pool)
 		if cfg.RateLimiting.Enabled {
 			log.Printf("Enabling rate limiting for service '%s'", service.Name)
@@ -251,6 +253,7 @@ func buildRouter(cfg *Config, consulClient *api.Client) *http.ServeMux {
 			log.Printf("Enabling JWT authentication for service '%s'", service.Name)
 			handler = jwtAuthMiddleware(handler, rsaPubKey)
 		}
+		handler = metricsMiddleware(handler, service.Name)
 		mux.Handle(service.Path, handler)
 		log.Printf("Registered handler for service '%s' at path '%s'", service.Name, service.Path)
 	}
@@ -274,13 +277,17 @@ func main() {
 
 	go watchConfig(configPath, &globalRouter, consulClient)
 
-	rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	proxyRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		router := globalRouter.Load().(*http.ServeMux)
 		router.ServeHTTP(w, r)
 	})
 
+	mainRouter := http.NewServeMux()
+	mainRouter.Handle("/metrics", promhttp.Handler())
+	mainRouter.Handle("/", proxyRootHandler)
+
 	log.Printf("API Gateway listening on port %s", cfg.GatewayPort)
-	if err := http.ListenAndServe(":"+cfg.GatewayPort, rootHandler); err != nil {
+	if err := http.ListenAndServe(":"+cfg.GatewayPort, mainRouter); err != nil {
 		log.Fatalf("Gateway server failed: %v", err)
 	}
 }
