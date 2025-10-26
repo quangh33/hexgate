@@ -51,7 +51,7 @@ docker-compose up -d
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (login: admin / admin)
 
-## 📊Monitoring Dashboard
+## 📊 Monitoring Dashboard
 HexGate is pre-configured to work with the included Prometheus and Grafana stack.
 
 ### Grafana Setup
