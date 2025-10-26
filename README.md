@@ -13,6 +13,7 @@ or fail health checks.
 - **JWT Authentication (RS256)**: Secures routes with a secure, asymmetric (RS256) JWT validation middleware.
 - **Per-IP Rate Limiting**: Protects services with a per-service, per-IP token bucket rate limiter.
 - **Built-in Observability**: Exposes a `/metrics` endpoint for Prometheus, tracking request rates, latencies, and response codes
+- **TLS/SSL Termination**
 ## Design
 ![](img/architecture.png)
 ## 🚀 Getting Started

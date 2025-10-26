@@ -24,6 +24,7 @@ type Config struct {
 	Services       []Service       `yaml:"services"`
 	RateLimiting   RateLimitConfig `yaml:"rateLimiting"`
 	Authentication AuthConfig      `yaml:"authentication"`
+	TLS            TLSConfig       `yaml:"tls"`
 }
 
 type RateLimitConfig struct {
@@ -286,8 +287,27 @@ func main() {
 	mainRouter.Handle("/metrics", promhttp.Handler())
 	mainRouter.Handle("/", proxyRootHandler)
 
-	log.Printf("API Gateway listening on port %s", cfg.GatewayPort)
-	if err := http.ListenAndServe(":"+cfg.GatewayPort, mainRouter); err != nil {
-		log.Fatalf("Gateway server failed: %v", err)
+	if cfg.TLS.Enabled {
+		go func() {
+			httpPort := ":" + cfg.GatewayPort
+			log.Printf("Starting HTTP-to-HTTPS redirect server on port %s", cfg.GatewayPort)
+			redirectMux := http.NewServeMux()
+			redirectMux.HandleFunc("/", createRedirectHandler(cfg.TLS.HTTPSPort))
+			if err := http.ListenAndServe(httpPort, redirectMux); err != nil {
+				// Don't use Fatalf here, as the main HTTPS server is the important one
+				log.Printf("Redirect server failed: %v", err)
+			}
+		}()
+
+		httpsPort := ":" + cfg.TLS.HTTPSPort
+		log.Printf("API Gateway (HTTPS) listening on port %s", cfg.TLS.HTTPSPort)
+		if err := http.ListenAndServeTLS(httpsPort, cfg.TLS.CertFile, cfg.TLS.KeyFile, mainRouter); err != nil {
+			log.Fatalf("Gateway server (HTTPS) failed: %v", err)
+		}
+	} else {
+		log.Printf("API Gateway listening on port %s", cfg.GatewayPort)
+		if err := http.ListenAndServe(":"+cfg.GatewayPort, mainRouter); err != nil {
+			log.Fatalf("Gateway server failed: %v", err)
+		}
 	}
 }
