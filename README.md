@@ -1,7 +1,7 @@
 # HexGate
 HexGate is a lightweight, high-performance API Gateway built from scratch in Go.
 
-![img.png](hexgate.png)
+![](hexgate.png)
 
 ## ✨Features
 - **Dynamic Service Discovery**: Integrates directly with HashiCorp Consul. 
