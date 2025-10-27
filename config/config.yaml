@@ -13,10 +13,6 @@ services:
     consulServiceName: "product-service"
     quota:
       enabled: false
-rateLimiting:
-  enabled: true
-  ratePerSecond: 1   # tokens added per second
-  burst: 3
 authentication:
   enabled: true
   publicKeyPath: "./config/public.pem"
