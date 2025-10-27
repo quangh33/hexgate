@@ -4,6 +4,7 @@ HexGate is a lightweight, high-performance API Gateway built from scratch in Go.
 ![](img/gate.png)
 
 ## ✨Features
+- **High Availability (HA)**: Deployed with an Nginx load balancer in front of multiple, scalable hexgate instances
 - **Dynamic Service Discovery**: Integrates directly with HashiCorp Consul. 
 Backends are no longer static; `hexgate` automatically discovers, adds, and removes them in real-time as they register
 or fail health checks.
@@ -13,7 +14,7 @@ or fail health checks.
 - **JWT Authentication (RS256)**: Secures routes with a secure, asymmetric (RS256) JWT validation middleware.
 - **Distributed Quotas**: Uses Redis with a `Sliding Window` algorithm to enforce shared quotas (e.g., 1000 requests/day) across all gateway instances.
 - **Built-in Observability**: Exposes a `/metrics` endpoint for Prometheus, tracking request rates, latencies, and response codes
-- **TLS/SSL Termination**: Secures the gateway with HTTPS, encrypting all client traffic.
+- **TLS/SSL Termination**: Centralized SSL termination at the Nginx load balancer.
 ## Design
 ![](img/architecture.png)
 ## 🚀 Getting Started
@@ -39,19 +40,21 @@ and allow the client to encrypt data. It's safe to share.
 It must never be shared. It's the only thing that can decrypt data sent by clients.
 
 3. Run the full stack
+
+Start all services in `High-Availability` mode (with 2 hexgate instances).
 ```bash
-docker-compose up -d --build
+docker-compose up -d --build --scale hexgate=2
 ```
 
 The service is now running:
-- HexGate (HTTPS): https://localhost:8443
-- HexGate (HTTP Redirect): http://localhost:8000
+- Nginx Load Balancer (HTTPS): https://localhost:8443
 - Consul UI: http://localhost:8500
-- Redis (internal): redis:6379
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (login: admin / admin)
+- Redis (internal): redis:6379
 
 4. Run the Test Backends
+
 Open 3 new terminals and run the following commands, one in each:
 ```bash
 # Terminal 1: A user service
@@ -84,39 +87,40 @@ HexGate is pre-configured to work with the included Prometheus and Grafana stack
 ### Test 1: Service Discovery & Routing
 Now that your backends are running, send requests to the gateway:
 ```bash
+# This will be routed to the "product-service" pool
+curl -k https://localhost:8443/products/abc
+# Hello from Backend (Port 8083)
+
 # This will be routed to the "user-service" pool
-curl https://localhost:8443/users/1
-# Hello from user-service (Port 8081)
+curl -k https://localhost:8443/users/1
+# Hello from Backend (Port 8081)
 
 # Send again to see the load balancing
-curl https://localhost:8443/users/2
-# Hello from user-service (Port 8082)
-
-# This will be routed to the "product-service" pool
-curl https://localhost:8443/products/abc
-# Hello from product-service (Port 8083)
+curl -k https://localhost:8443/users/2
+# Hello from Backend (Port 8082)
 ```
 Now, go to Terminal 3 (port 8081) and stop the server (Ctrl+C).
 Wait a few seconds for Consul to detect the failure.
 
 Now, all traffic for /users/ will go only to the remaining healthy backend:
 ```bash
-curl https://localhost:8443/users/3
-# Hello from user-service (Port 8082)
+curl -k https://localhost:8443/users/3
+# Hello from Backend (Port 8082)
 ```
 
 ### Test 2: Authentication (JWT)
-- Enable `authentication` in config/config.yaml file. All routes are now protected. A normal request will fail:
+- Authentication is enabled by default in config.yaml to support quotas.
+
 ```bash
-curl https://localhost:8443/users/1
+curl -k https://localhost:8443/users/1
 # 401 Unauthorized: Missing Authorization header
 ```
 
-Need to attach a JWT token to the header request
+Generate a token (by running `go run test/gentoken.go`) and attach it:
 ```
-TOKEN=eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjE0NzY2NjksImlhdCI6MTc2MTM5MDI2OSwibmFtZSI6IlRlc3QgVXNlciIsInN1YiI6InVzZXItMTIzLWFiYyJ9.noYkvn-b005BoXJJEcm5YeDpkRBiNpkQ4MDN0c07nQwfhEtKb33ifToXz5LqsmcwHolnAmKX2mxfzfQm0v7BQki6fFex985WpvOGGobSxUAXMNEltT60Ees3TNDiViqTSw-q0T_CS6w5Rh5mrf53sExRlzkNLg30A0bNNuW_F91ICnxhi741U5B41JgBcAK3JVasJK6h-nTto_dWKftLNTR_sg9cSz7dDNlwoiB_8BpDP07l5L1Jf2Q5FrmFIBuQSELMz0ec2ON9s2YoL1L_vHS3_w5owSvVGQu1K1Yr3ZK6keOvdDbPY4yOQEOl0cTYZ9-HII_0-TbCBtXuZ8bEsw
+TOKEN=...[token]...
 
-curl -H "Authorization: Bearer $TOKEN" https://localhost:8443/users/3
+curl -H "Authorization: Bearer $TOKEN" https://localhost:8443/users/1
 ```
 
 ### Test 3: Rate Limiting

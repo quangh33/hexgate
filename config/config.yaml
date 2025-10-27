@@ -21,7 +21,7 @@ authentication:
   enabled: true
   publicKeyPath: "./config/public.pem"
 tls:
-  enabled: true
+  enabled: false
   httpsPort: "8443" # This will be the main HTTPS port
   certFile: "./config/cert.pem"
   keyFile: "./config/key.pem"

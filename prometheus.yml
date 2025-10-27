@@ -7,11 +7,18 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   - job_name: 'hexgate'
-    scheme: https
-    tls_config:
-      insecure_skip_verify: true
-    static_configs:
-      # 'host.docker.internal' is a special DNS name that resolves
-      # to the host machine from within a Docker container.
-      # Port 8443 is from config.yaml.
-      - targets: ['host.docker.internal:8443']
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+    relabel_configs:
+      # Keep containers on our project's network
+      - source_labels: [__meta_docker_network_name]
+        regex: hexgate_monitoring-net
+        action: keep
+      # Keep only containers from the 'hexgate' service
+      - source_labels: [ __meta_docker_container_label_com_docker_compose_service ]
+        regex: hexgate
+        action: keep
+      # Scrape on port 8000
+      - regex: '.*'
+        replacement: $1:8000
+        target_label: __address__
