@@ -1,6 +1,10 @@
 # HexGate
 HexGate is a lightweight, high-performance API Gateway built from scratch in Go.
 
+This project is a high-availability, stateless API gateway that runs in a complete Docker-based
+environment. It features an Nginx load balancer (Tier 1) routing traffic to a scalable pool of stateless HexGate instances (Tier 2)
+, which in turn use `Consul` for service discovery and `Redis` for distributed quotas.
+
 ![](img/gate.png)
 
 ## ✨Features
