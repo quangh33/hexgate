@@ -10,9 +10,15 @@ import (
 	"strconv"
 )
 
+// How to run:
+// go run test/backend.go -port 8081 -service "user-service" -advertise-addr "host.docker.internal"
+// go run test/backend.go -port 8082 -service "user-service" -advertise-addr "host.docker.internal"
+// go run test/backend.go -port 8083 -service "product-service" -advertise-addr "host.docker.internal"
+
 func main() {
 	port := flag.Int("port", 0, "Port to listen on (e.g., 8081)")
 	serviceName := flag.String("service", "", "Service name to register in Consul (e.g., 'user-service')")
+	advertiseAddr := flag.String("advertise-addr", "127.0.0.1", "Address to advertise to Consul")
 
 	flag.Parse()
 
@@ -33,9 +39,9 @@ func main() {
 		ID:      serviceID,
 		Name:    *serviceName,
 		Port:    *port,
-		Address: "127.0.0.1",
+		Address: *advertiseAddr,
 		Check: &api.AgentServiceCheck{
-			HTTP:     fmt.Sprintf("http://127.0.0.1:%s/health", portStr),
+			HTTP:     fmt.Sprintf("http://%s:%s/health", *advertiseAddr, portStr),
 			Interval: "5s",
 			Timeout:  "1s",
 		},

@@ -3,45 +3,30 @@ package main
 import (
 	"crypto/rsa"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/consul/api"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"golang.org/x/time/rate"
-	"gopkg.in/yaml.v3"
+	"github.com/redis/go-redis/v9"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type Config struct {
-	GatewayPort    string          `yaml:"gatewayPort"`
-	Services       []Service       `yaml:"services"`
-	RateLimiting   RateLimitConfig `yaml:"rateLimiting"`
-	Authentication AuthConfig      `yaml:"authentication"`
-	TLS            TLSConfig       `yaml:"tls"`
-}
-
-type RateLimitConfig struct {
-	Enabled       bool    `yaml:"enabled"`
-	RatePerSecond float64 `yaml:"ratePerSecond"`
-	Burst         int     `yaml:"burst"`
+	GatewayPort    string      `yaml:"gatewayPort"`
+	Services       []Service   `yaml:"services"`
+	Authentication AuthConfig  `yaml:"authentication"`
+	TLS            TLSConfig   `yaml:"tls"`
+	Redis          RedisConfig `yaml:"redis"`
 }
 
 type Service struct {
-	Name              string `yaml:"name"`
-	Path              string `yaml:"path"`
-	ConsulServiceName string `yaml:"consulServiceName"`
-}
-
-type visitor struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+	Name              string      `yaml:"name"`
+	Path              string      `yaml:"path"`
+	ConsulServiceName string      `yaml:"consulServiceName"`
+	Quota             QuotaConfig `yaml:"quota"`
 }
 
 type AuthConfig struct {
@@ -58,83 +43,20 @@ type Backend struct {
 
 // ServerPool holds the list of available backends
 type ServerPool struct {
-	backends          map[string]*Backend // Consul Service id -> Backend
-	current           uint64
-	mu                sync.RWMutex
-	visitorsRateLimit sync.Map // one rate limiter per user per service
+	backends map[string]*Backend // Consul Service id -> Backend
+	current  uint64
+	mu       sync.RWMutex
 }
 
 // NewServerPool creates a new server pool
 func NewServerPool() *ServerPool {
 	return &ServerPool{
-		backends:          make(map[string]*Backend),
-		current:           0,
-		visitorsRateLimit: sync.Map{},
+		backends: make(map[string]*Backend),
+		current:  0,
 	}
 }
 
-func loadConfig(configPath string, consulClient *api.Client) (*http.ServeMux, *Config, error) {
-	log.Printf("Loading configuration from %s...", configPath)
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("could not read config file: %w", err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, nil, fmt.Errorf("could not parse config YAML: %w", err)
-	}
-
-	router := buildRouter(&cfg, consulClient)
-	log.Println("Configuration loaded successfully.")
-	return router, &cfg, nil
-}
-
-func watchConfig(configPath string, globalRouter *atomic.Value, consulClient *api.Client) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Fatalf("Failed to create file watcher: %v", err)
-	}
-	configDir := filepath.Dir(configPath)
-	configName := filepath.Base(configPath)
-
-	go func() {
-		for {
-			select {
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if filepath.Base(event.Name) == configName {
-					if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
-						log.Println("Config file modified. Reloading...")
-						time.Sleep(100 * time.Millisecond)
-						newRouter, _, err := loadConfig(configPath, consulClient)
-						if err != nil {
-							log.Printf("Error reloading config: %v. Keeping old config.", err)
-							continue
-						}
-
-						globalRouter.Store(newRouter)
-						log.Println("Hot reload complete. New configuration is active.")
-					}
-				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				log.Println("File watcher error:", err)
-			}
-		}
-	}()
-
-	err = watcher.Add(configDir)
-	if err != nil {
-		log.Fatalf("Failed to add config directory to watcher: %v", err)
-	}
-	log.Printf("Watching for config changes in directory: %s", configDir)
-}
+var redisClient *redis.Client
 
 func (s *ServerPool) RemoveBackend(serviceID string) {
 	s.mu.Lock()
@@ -245,16 +167,22 @@ func buildRouter(cfg *Config, consulClient *api.Client) *http.ServeMux {
 
 		// --- MIDDLEWARE CHAINING ---
 		var handler http.Handler = newServiceHandler(pool)
-		if cfg.RateLimiting.Enabled {
-			log.Printf("Enabling rate limiting for service '%s'", service.Name)
-			handler = rateLimitMiddleware(handler, cfg.RateLimiting, pool)
-			pool.startVisitorsRateLimitJanitor()
+
+		if service.Quota.Enabled {
+			if !cfg.Authentication.Enabled {
+				log.Fatalf("Service '%s' has quota enabled, but global authentication is disabled. Quota requires authentication.", service.Name)
+			}
+			log.Printf("Enabling distributed quota for service '%s'", service.Name)
+			handler = quotaMiddleware(handler, service.Quota, redisClient)
 		}
+
 		if cfg.Authentication.Enabled {
 			log.Printf("Enabling JWT authentication for service '%s'", service.Name)
 			handler = jwtAuthMiddleware(handler, rsaPubKey)
 		}
+
 		handler = metricsMiddleware(handler, service.Name)
+
 		mux.Handle(service.Path, handler)
 		log.Printf("Registered handler for service '%s' at path '%s'", service.Name, service.Path)
 	}
@@ -263,16 +191,23 @@ func buildRouter(cfg *Config, consulClient *api.Client) *http.ServeMux {
 
 func main() {
 	configPath := "./config/config.yaml"
+
+	cfg, err := loadConfigOnly(configPath)
+	if err != nil {
+		log.Fatalf("Failed to load initial configuration: %v", err)
+	}
+
+	redisClient, err = NewRedisClient(cfg.Redis)
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+
 	consulClient, err := api.NewClient(api.DefaultConfig())
 	if err != nil {
 		log.Fatalf("Failed to create Consul client: %v", err)
 	}
 
-	initialRouter, cfg, err := loadConfig(configPath, consulClient)
-	if err != nil {
-		log.Fatalf("Failed to load initial configuration: %v", err)
-	}
-
+	initialRouter := buildRouter(cfg, consulClient)
 	var globalRouter atomic.Value
 	globalRouter.Store(initialRouter)
 

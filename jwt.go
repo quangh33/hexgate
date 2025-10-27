@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -12,6 +13,10 @@ import (
 	"os"
 	"strings"
 )
+
+type contextKey string
+
+const userIDKey contextKey = "userID"
 
 func loadPublicKey(path string) (*rsa.PublicKey, error) {
 	data, err := os.ReadFile(path)
@@ -70,7 +75,15 @@ func jwtAuthMiddleware(next http.Handler, key *rsa.PublicKey) http.Handler {
 			return
 		}
 
+		log.Printf("Claims: %v", token.Claims)
+		userID, err := token.Claims.GetSubject()
+		if err != nil {
+			log.Printf("Token missing 'sub' claim: %v", err)
+			http.Error(w, "401 Unauthorized: Invalid token claims", http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), userIDKey, userID)
 		log.Println("JWT authenticated successfully")
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

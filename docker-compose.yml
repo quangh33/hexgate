@@ -5,6 +5,41 @@ networks:
     driver: bridge # private, internal virtual network
 
 services:
+  hexgate:
+      # build an image using 'Dockerfile' in current dic (.)
+      build:
+        context: .
+        dockerfile: Dockerfile
+      ports:
+        - "8443:8443"
+        - "8000:8000"
+      networks:
+        - monitoring-net
+      depends_on:
+        - redis
+        - consul
+      # Add a DNS entry map from host.docker.internal to host machine IP
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      environment:
+        CONSUL_HTTP_ADDR: "http://consul:8500"
+  consul:
+    image: hashicorp/consul:latest
+    container_name: consul
+    ports:
+      - "8500:8500"
+    command: "agent -dev -client 0.0.0.0"
+    networks:
+      - monitoring-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - monitoring-net
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
@@ -14,11 +49,8 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     networks:
       - monitoring-net
-    # Ensures that when
-    # Prometheus (inside Docker) tries to scrape 'host.docker.internal',
-    # it correctly resolves to your host machine (where your Go app is running).
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      - hexgate
 
   grafana:
     image: grafana/grafana:latest
@@ -29,6 +61,7 @@ services:
       - monitoring-net
     volumes:
       - grafana-data:/var/lib/grafana
-
+    depends_on:
+      - prometheus
 volumes:
   grafana-data: {}

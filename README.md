@@ -11,7 +11,7 @@ or fail health checks.
 (e.g., /users/* -> user-service, /products/* -> product-service).
 - **Zero-Downtime Hot Reloading**: Automatically detects changes to config.yaml (e.g., new services, auth keys)
 - **JWT Authentication (RS256)**: Secures routes with a secure, asymmetric (RS256) JWT validation middleware.
-- **Per-IP Rate Limiting**: Protects services with a per-service, per-IP token bucket rate limiter.
+- **Distributed Quotas**: Uses Redis with a `Sliding Window` algorithm to enforce shared quotas (e.g., 1000 requests/day) across all gateway instances.
 - **Built-in Observability**: Exposes a `/metrics` endpoint for Prometheus, tracking request rates, latencies, and response codes
 - **TLS/SSL Termination**: Secures the gateway with HTTPS, encrypting all client traffic.
 ## Design
@@ -19,14 +19,9 @@ or fail health checks.
 ## 🚀 Getting Started
 1. Prerequisites 
 - Go 1.19 or later
-- HashiCorp Consul (for service discovery)
 - Docker & Docker Compose (for monitoring stack)
 
-2. Run Consul
-```bash
-consul agent -dev
-```
-3. Generate SSL Certificates (for TLS)
+2. Generate SSL Certificates (for TLS)
 The gateway is configured to run in HTTPS mode by default.
 You must generate a self-signed certificate and private key for it to find.
 ```bash
@@ -42,33 +37,35 @@ This will create key.pem and cert.pem inside the config folder.
 and allow the client to encrypt data. It's safe to share.
 - key.pem (Private Key): This is your server's secret.
 It must never be shared. It's the only thing that can decrypt data sent by clients.
-4. Run `hexgate`
-```
-go run .
-```
-5. Run the Test Backends
-Open 3 new terminals and run the following commands, one in each:
+
+3. Run the full stack
 ```bash
-# Terminal 3: A user service
-go run test/backend.go -port 8081 -service "user-service"
-
-# Terminal 4: Another user service
-go run test/backend.go -port 8082 -service "user-service"
-
-# Terminal 5: A product service
-go run test/backend.go -port 8083 -service "product-service"
+docker-compose up -d --build
 ```
-As you start each backend, you will see `hexgate`'s log update in real-time as it discovers them!
 
-6. Run the Monitoring Stack (Optional)
-
-This launches Prometheus and Grafana, pre-configured to scrape HexGate.
-
-```bash
-docker-compose up -d
-```
+The service is now running:
+- HexGate (HTTPS): https://localhost:8443
+- HexGate (HTTP Redirect): http://localhost:8000
+- Consul UI: http://localhost:8500
+- Redis (internal): redis:6379
 - Prometheus: http://localhost:9090
 - Grafana: http://localhost:3000 (login: admin / admin)
+
+4. Run the Test Backends
+Open 3 new terminals and run the following commands, one in each:
+```bash
+# Terminal 1: A user service
+go run test/backend.go -port 8081 -service "user-service" -advertise-addr "host.docker.internal"
+
+# Terminal 2: Another user service
+go run test/backend.go -port 8082 -service "user-service" -advertise-addr "host.docker.internal"
+
+# Terminal 3: A product service
+go run test/backend.go -port 8083 -service "product-service" -advertise-addr "host.docker.internal"
+```
+
+Go to your Consul UI (http://localhost:8500) and you will see these services marked as "healthy."
+Your hexgate logs (via docker-compose logs -f hexgate) will show them being discovered.
 
 ## 📊 Monitoring Dashboard
 HexGate is pre-configured to work with the included Prometheus and Grafana stack.

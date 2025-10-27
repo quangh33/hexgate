@@ -4,18 +4,28 @@ services:
   - name: "user-service"
     path: "/users/"
     consulServiceName: "user-service"
+    quota:
+      enabled: true
+      limit: 5
+      period: "1m"
   - name: "product-service"
     path: "/products/"
     consulServiceName: "product-service"
+    quota:
+      enabled: false
 rateLimiting:
   enabled: true
   ratePerSecond: 1   # tokens added per second
   burst: 3
 authentication:
-  enabled: false
+  enabled: true
   publicKeyPath: "./config/public.pem"
 tls:
   enabled: true
   httpsPort: "8443" # This will be the main HTTPS port
   certFile: "./config/cert.pem"
   keyFile: "./config/key.pem"
+redis:
+  address: "redis:6379" # Use the Docker service name
+  password: ""
+  db: 0
