@@ -190,9 +190,12 @@ func buildRouter(cfg *Config, consulClient *api.Client) *http.ServeMux {
 }
 
 func main() {
-	configPath := "./config/config.yaml"
+	consulClient, err := api.NewClient(api.DefaultConfig())
+	if err != nil {
+		log.Fatalf("Failed to create Consul client: %v", err)
+	}
 
-	cfg, err := loadConfigOnly(configPath)
+	cfg, lastIndex, err := loadInitialConfigFromConsul(consulClient, consulConfigKey)
 	if err != nil {
 		log.Fatalf("Failed to load initial configuration: %v", err)
 	}
@@ -202,16 +205,11 @@ func main() {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
 
-	consulClient, err := api.NewClient(api.DefaultConfig())
-	if err != nil {
-		log.Fatalf("Failed to create Consul client: %v", err)
-	}
-
 	initialRouter := buildRouter(cfg, consulClient)
 	var globalRouter atomic.Value
 	globalRouter.Store(initialRouter)
 
-	go watchConfig(configPath, &globalRouter, consulClient)
+	go watchConsulConfig(consulConfigKey, lastIndex, &globalRouter, consulClient)
 
 	proxyRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		router := globalRouter.Load().(*http.ServeMux)

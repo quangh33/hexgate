@@ -14,11 +14,11 @@ Backends are no longer static; `hexgate` automatically discovers, adds, and remo
 or fail health checks.
 - **Path-Based Routing**: Intelligently routes requests to different backend service pools based on the URL path
 (e.g., /users/* -> user-service, /products/* -> product-service).
-- **Zero-Downtime Hot Reloading**: Automatically detects changes to config.yaml (e.g., new services, auth keys)
 - **JWT Authentication (RS256)**: Secures routes with a secure, asymmetric (RS256) JWT validation middleware.
 - **Distributed Quotas**: Uses Redis with a `Sliding Window` algorithm to enforce shared quotas (e.g., 1000 requests/day) across all gateway instances.
 - **Built-in Observability**: Exposes a `/metrics` endpoint for Prometheus, tracking request rates, latencies, and response codes
 - **TLS/SSL Termination**: Centralized SSL termination at the Nginx load balancer.
+- **Dynamic Configuration (Hot Reload)**: Uses Consul KV as a centralized, dynamic source of truth for all configuration.
 ## Design
 ![](img/architecture.png)
 ## 🚀 Getting Started
@@ -43,7 +43,21 @@ and allow the client to encrypt data. It's safe to share.
 - key.pem (Private Key): This is your server's secret.
 It must never be shared. It's the only thing that can decrypt data sent by clients.
 
-3. Run the full stack
+3. Load Configuration into Consul The gateway no longer reads from config.yaml. You must load this configuration into
+the Consul Key/Value store before starting the stack.
+- Start Consul
+```bash
+docker-compose up -d consul
+```
+- Add the configuration
+  - Open the Consul UI: http://localhost:8500
+  - Click on Key/Value in the top menu.
+  - Click the Create button.
+  - For the Key, enter: hexgate/config
+  - For the Value, copy the entire contents of your local config/config.yaml file and paste it into the text box.
+  - Save
+
+4. Run the full stack
 
 Start all services in `High-Availability` mode (with 2 hexgate instances).
 ```bash
@@ -57,7 +71,7 @@ The service is now running:
 - Grafana: http://localhost:3000 (login: admin / admin)
 - Redis (internal): redis:6379
 
-4. Run the Test Backends
+5. Run the Test Backends
 
 Open 3 new terminals and run the following commands, one in each:
 ```bash
